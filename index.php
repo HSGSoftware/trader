@@ -86,6 +86,7 @@ body { background: #0d0f14; font-family: 'Segoe UI', sans-serif; }
                 </option>
             <?php endforeach; ?>
         </select>
+        <span id="priceDisplay" class="text-muted small me-1" style="font-family:monospace">—</span>
         <span id="botStatusBadge" class="badge rounded-pill px-3 py-2 stopped">
             <i class="bi bi-circle-fill me-1" style="font-size:8px"></i>BOT DURDU
         </span>
@@ -109,6 +110,7 @@ body { background: #0d0f14; font-family: 'Segoe UI', sans-serif; }
             <div class="stat-card p-3">
                 <div class="text-muted small mb-1"><i class="bi bi-currency-bitcoin me-1"></i>Güncel Fiyat</div>
                 <div class="fs-4 fw-bold" id="statPrice">—</div>
+                <div id="statPriceChange" class="small text-muted"></div>
             </div>
         </div>
         <div class="col-6 col-md-3">
@@ -147,6 +149,9 @@ body { background: #0d0f14; font-family: 'Segoe UI', sans-serif; }
                             <small class="text-muted" id="lastDecisionTime">—</small>
                         </div>
                         <div class="card-body">
+                            <div id="botErrorAlert" class="alert alert-danger py-2 px-3 mb-3 d-none" style="font-size:0.85rem">
+                                <i class="bi bi-exclamation-triangle me-1"></i><span id="botErrorMsg"></span>
+                            </div>
                             <div class="d-flex align-items-center gap-3 mb-3">
                                 <span id="decisionBadge" class="badge fs-5 px-4 py-2 badge-hold">HOLD</span>
                                 <div>
@@ -253,11 +258,23 @@ body { background: #0d0f14; font-family: 'Segoe UI', sans-serif; }
                             <div class="card-body">
                                 <div class="mb-3">
                                     <label class="form-label text-muted small">Anthropic API Key</label>
-                                    <input type="password" class="form-control" name="anthropic_api_key" value="<?= s('anthropic_api_key') ?>" placeholder="sk-ant-...">
+                                    <div class="input-group">
+                                        <input type="password" class="form-control" id="inp_anthropic" name="anthropic_api_key" value="<?= s('anthropic_api_key') ?>" placeholder="sk-ant-...">
+                                        <button type="button" class="btn btn-outline-secondary" onclick="testApi('anthropic','inp_anthropic','res_anthropic')">
+                                            <i class="bi bi-plug me-1"></i>Test
+                                        </button>
+                                    </div>
+                                    <div id="res_anthropic" class="mt-1"></div>
                                 </div>
                                 <div class="mb-3">
                                     <label class="form-label text-muted small">Binance API Key</label>
-                                    <input type="text" class="form-control" name="binance_api_key" value="<?= s('binance_api_key') ?>">
+                                    <div class="input-group">
+                                        <input type="text" class="form-control" id="inp_binance" name="binance_api_key" value="<?= s('binance_api_key') ?>">
+                                        <button type="button" class="btn btn-outline-secondary" onclick="testApi('binance','inp_binance','res_binance')">
+                                            <i class="bi bi-plug me-1"></i>Test
+                                        </button>
+                                    </div>
+                                    <div id="res_binance" class="mt-1"></div>
                                 </div>
                                 <div class="mb-3">
                                     <label class="form-label text-muted small">Binance Secret</label>
@@ -265,11 +282,23 @@ body { background: #0d0f14; font-family: 'Segoe UI', sans-serif; }
                                 </div>
                                 <div class="mb-3">
                                     <label class="form-label text-muted small">CryptoPanic API Key <span class="text-muted">(opsiyonel)</span></label>
-                                    <input type="text" class="form-control" name="cryptopanic_api_key" value="<?= s('cryptopanic_api_key') ?>">
+                                    <div class="input-group">
+                                        <input type="text" class="form-control" id="inp_cryptopanic" name="cryptopanic_api_key" value="<?= s('cryptopanic_api_key') ?>">
+                                        <button type="button" class="btn btn-outline-secondary" onclick="testApi('cryptopanic','inp_cryptopanic','res_cryptopanic')">
+                                            <i class="bi bi-plug me-1"></i>Test
+                                        </button>
+                                    </div>
+                                    <div id="res_cryptopanic" class="mt-1"></div>
                                 </div>
                                 <div class="mb-0">
                                     <label class="form-label text-muted small">LunarCrush API Key <span class="text-muted">(opsiyonel)</span></label>
-                                    <input type="text" class="form-control" name="lunarcrush_api_key" value="<?= s('lunarcrush_api_key') ?>">
+                                    <div class="input-group">
+                                        <input type="text" class="form-control" id="inp_lunarcrush" name="lunarcrush_api_key" value="<?= s('lunarcrush_api_key') ?>">
+                                        <button type="button" class="btn btn-outline-secondary" onclick="testApi('lunarcrush','inp_lunarcrush','res_lunarcrush')">
+                                            <i class="bi bi-plug me-1"></i>Test
+                                        </button>
+                                    </div>
+                                    <div id="res_lunarcrush" class="mt-1"></div>
                                 </div>
                             </div>
                         </div>
@@ -456,23 +485,34 @@ function startCountdown() {
 // ─── Bot Cycle ───────────────────────────────────────────────────────────────
 async function runBotCycle() {
     const pair = document.getElementById('pairSelector').value;
+    hideBotError();
     try {
         const resp = await fetch(`bot_engine.php?action=run&pair=${pair}`);
         const data = await resp.json();
         if (!data.success) {
-            console.error('Bot hatası:', data.error);
-            showDecision({ decision: 'ERROR', confidence: 0, manipulation_risk: 0, reason: data.error });
+            showBotError(data.error || 'Bilinmeyen hata');
             return;
         }
         state.lastDecision = data;
+        hideBotError();
         showDecision(data);
         updateStats(data);
         refreshOpenTrades();
         refreshRecentLogs();
+        refreshStats();
         if (data.order_book) updateOBPanel(data.order_book);
     } catch(e) {
-        console.error('Fetch hatası:', e);
+        showBotError('Sunucu bağlantı hatası: ' + e.message);
     }
+}
+
+function showBotError(msg) {
+    document.getElementById('botErrorMsg').textContent = msg;
+    document.getElementById('botErrorAlert').classList.remove('d-none');
+}
+
+function hideBotError() {
+    document.getElementById('botErrorAlert').classList.add('d-none');
 }
 
 // ─── UI Updates ──────────────────────────────────────────────────────────────
@@ -492,12 +532,22 @@ function showDecision(d) {
 
 function updateStats(data) {
     if (data.balance !== undefined)
-        document.getElementById('statBalance').textContent = '$' + Number(data.balance).toLocaleString('tr-TR', {minimumFractionDigits:2, maximumFractionDigits:2});
-    if (data.price !== undefined)
-        document.getElementById('statPrice').textContent   = '$' + Number(data.price).toLocaleString('tr-TR', {minimumFractionDigits:2, maximumFractionDigits:2});
+        document.getElementById('statBalance').textContent =
+            '$' + Number(data.balance).toLocaleString('tr-TR', {minimumFractionDigits:2, maximumFractionDigits:2});
+    if (data.price !== undefined && data.price > 0) {
+        const priceStr = '$' + Number(data.price).toLocaleString('tr-TR', {minimumFractionDigits:2, maximumFractionDigits:2});
+        document.getElementById('statPrice').textContent = priceStr;
+        const chg = parseFloat(data.change_pct) || 0;
+        const chgEl = document.getElementById('statPriceChange');
+        if (chgEl) {
+            chgEl.textContent = (chg >= 0 ? '▲' : '▼') + ' ' + Math.abs(chg).toFixed(2) + '%';
+            chgEl.className   = 'small ' + (chg >= 0 ? 'pnl-positive' : 'pnl-negative');
+        }
+        document.getElementById('priceDisplay').textContent = priceStr;
+    }
 }
 
-async function refreshStatus() {
+async function refreshStats() {
     const resp = await fetch('bot_engine.php?action=status');
     const data = await resp.json();
     if (!data.success) return;
@@ -505,17 +555,50 @@ async function refreshStatus() {
     document.getElementById('statBalance').textContent =
         '$' + Number(data.balance).toLocaleString('tr-TR', {minimumFractionDigits:2});
 
+    if (data.price && data.price.current > 0) {
+        const pr    = data.price;
+        const prStr = '$' + Number(pr.current).toLocaleString('tr-TR', {minimumFractionDigits:2});
+        document.getElementById('statPrice').textContent = prStr;
+        document.getElementById('priceDisplay').textContent = prStr;
+        const chgEl = document.getElementById('statPriceChange');
+        if (chgEl) {
+            const chg = parseFloat(pr.change_pct) || 0;
+            chgEl.textContent = (chg >= 0 ? '▲' : '▼') + ' ' + Math.abs(chg).toFixed(2) + '%';
+            chgEl.className   = 'small ' + (chg >= 0 ? 'pnl-positive' : 'pnl-negative');
+        }
+    }
+
     const s = data.stats;
     if (s) {
         const pnl = parseFloat(s.total_pnl) || 0;
         const el  = document.getElementById('statTotalPnl');
-        el.textContent = (pnl >= 0 ? '+' : '') + '$' + pnl.toLocaleString('tr-TR', {minimumFractionDigits:2});
+        el.textContent = (pnl >= 0 ? '+' : '') + '$' + Math.abs(pnl).toLocaleString('tr-TR', {minimumFractionDigits:2});
         el.className   = 'fs-4 fw-bold ' + (pnl >= 0 ? 'pnl-positive' : 'pnl-negative');
 
         const total = (parseInt(s.wins)||0) + (parseInt(s.losses)||0);
         document.getElementById('statWinRate').textContent =
             total > 0 ? Math.round((s.wins / total) * 100) + '%' : '—';
     }
+}
+
+async function fetchAndShowPrice() {
+    const pair = document.getElementById('pairSelector').value;
+    try {
+        const resp = await fetch(`bot_engine.php?action=get_price&pair=${pair}`);
+        const data = await resp.json();
+        if (data.success && data.price && data.price.current > 0) {
+            const pr    = data.price;
+            const prStr = '$' + Number(pr.current).toLocaleString('tr-TR', {minimumFractionDigits:2});
+            document.getElementById('statPrice').textContent = prStr;
+            document.getElementById('priceDisplay').textContent = prStr;
+            const chgEl = document.getElementById('statPriceChange');
+            if (chgEl) {
+                const chg = parseFloat(pr.change_pct) || 0;
+                chgEl.textContent = (chg >= 0 ? '▲' : '▼') + ' ' + Math.abs(chg).toFixed(2) + '%';
+                chgEl.className   = 'small ' + (chg >= 0 ? 'pnl-positive' : 'pnl-negative');
+            }
+        }
+    } catch(e) {}
 }
 
 async function refreshOpenTrades() {
@@ -707,7 +790,7 @@ async function closeTrade(id) {
     const data = await resp.json();
     if (data.success) {
         refreshOpenTrades();
-        refreshStatus();
+        refreshStats();
         loadTrades('all');
     } else {
         alert('Hata: ' + data.error);
@@ -720,6 +803,7 @@ document.getElementById('pairSelector').addEventListener('change', function() {
     fd.append('action', 'save_settings');
     fd.append('active_pair', this.value);
     fetch('bot_engine.php', { method: 'POST', body: fd });
+    fetchAndShowPrice();
 });
 
 // ─── Settings ────────────────────────────────────────────────────────────────
@@ -765,10 +849,38 @@ function updateWeightLabel(name, val) {
 document.querySelector('[href="#tabTrades"]').addEventListener('click', () => loadTrades('all'));
 document.querySelector('[href="#tabLogs"]').addEventListener('click', () => loadLogs());
 
-// ─── Init ─────────────────────────────────────────────────────────────────────
-refreshStatus();
+// ─── API Test ────────────────────────────────────────────────────────────────
+async function testApi(api, inputId, resultId) {
+    const key    = document.getElementById(inputId).value.trim();
+    const el     = document.getElementById(resultId);
+    el.innerHTML = '<span class="text-muted small"><i class="bi bi-hourglass-split me-1"></i>Test ediliyor...</span>';
+
+    const fd = new FormData();
+    fd.append('action', 'test_api');
+    fd.append('api', api);
+    fd.append('key', key);
+
+    try {
+        const resp = await fetch('bot_engine.php', { method: 'POST', body: fd });
+        const data = await resp.json();
+        if (data.success) {
+            el.innerHTML = `<span class="text-success small"><i class="bi bi-check-circle me-1"></i>${data.message}</span>`;
+        } else {
+            el.innerHTML = `<span class="text-danger small"><i class="bi bi-x-circle me-1"></i>${data.error}</span>`;
+        }
+    } catch(e) {
+        el.innerHTML = `<span class="text-danger small"><i class="bi bi-x-circle me-1"></i>Bağlantı hatası</span>`;
+    }
+}
+
+// ─── Init ────────────────────────────────────────────────────────────────────
+refreshStats();
 refreshOpenTrades();
 refreshRecentLogs();
+fetchAndShowPrice();
+
+// Fiyatı her 30 saniyede yenile (bot çalışmasa bile)
+setInterval(fetchAndShowPrice, 30000);
 </script>
 </body>
 </html>

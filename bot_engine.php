@@ -12,59 +12,61 @@ $action = $_GET['action'] ?? $_POST['action'] ?? 'run';
 
 try {
     match ($action) {
-        'run'         => handleRun(),
-        'status'      => handleStatus(),
-        'close_trade' => handleCloseTrade(),
+        'run'           => handleRun(),
+        'status'        => handleStatus(),
+        'get_price'     => handleGetPrice(),
+        'close_trade'   => handleCloseTrade(),
         'save_settings' => handleSaveSettings(),
-        'get_logs'    => handleGetLogs(),
-        'get_trades'  => handleGetTrades(),
-        default       => throw new InvalidArgumentException("Bilinmeyen action: {$action}"),
+        'get_logs'      => handleGetLogs(),
+        'get_trades'    => handleGetTrades(),
+        'test_api'      => handleTestApi(),
+        default         => throw new InvalidArgumentException("Bilinmeyen action: {$action}"),
     };
 } catch (Throwable $e) {
     echo json_encode(['success' => false, 'error' => $e->getMessage()]);
 }
 
-// ─── Handlers ──────────────────────────────────────────────────────────────
+// ─── Handlers ───────────────────────────────────────────────────────────────
 
 function handleRun(): void
 {
     $db = Database::getInstance();
 
-    $anthropicKey   = Database::getSetting('anthropic_api_key',   '');
-    $binanceKey     = Database::getSetting('binance_api_key',     '');
-    $binanceSecret  = Database::getSetting('binance_api_secret',  '');
-    $cpKey          = Database::getSetting('cryptopanic_api_key', '');
-    $lcKey          = Database::getSetting('lunarcrush_api_key',  '');
-    $pair           = $_GET['pair'] ?? $_POST['pair'] ?? Database::getSetting('active_pair', 'BTCUSDT');
-    $pair           = strtoupper(trim($pair));
-    $model          = Database::getSetting('ai_model',            'claude-sonnet-4-5');
-    $tpPct          = (float)Database::getSetting('take_profit_pct', 5);
-    $slPct          = (float)Database::getSetting('stop_loss_pct',   3);
-    $tradeSizePct   = (float)Database::getSetting('trade_size_pct',  10);
-    $wTech          = (int)Database::getSetting('weight_technical',   40);
-    $wSocial        = (int)Database::getSetting('weight_social',      20);
-    $wNews          = (int)Database::getSetting('weight_news',        20);
-    $wManip         = (int)Database::getSetting('weight_manipulation',20);
+    $anthropicKey  = Database::getSetting('anthropic_api_key',   '');
+    $binanceKey    = Database::getSetting('binance_api_key',     '');
+    $binanceSecret = Database::getSetting('binance_api_secret',  '');
+    $cpKey         = Database::getSetting('cryptopanic_api_key', '');
+    $lcKey         = Database::getSetting('lunarcrush_api_key',  '');
+    $pair          = strtoupper(trim($_GET['pair'] ?? $_POST['pair'] ?? Database::getSetting('active_pair', 'BTCUSDT')));
+    $model         = Database::getSetting('ai_model',            'claude-sonnet-4-5');
+    $tpPct         = (float)Database::getSetting('take_profit_pct',    5);
+    $slPct         = (float)Database::getSetting('stop_loss_pct',      3);
+    $tradeSizePct  = (float)Database::getSetting('trade_size_pct',     10);
+    $wTech         = (int)Database::getSetting('weight_technical',     40);
+    $wSocial       = (int)Database::getSetting('weight_social',        20);
+    $wNews         = (int)Database::getSetting('weight_news',          20);
+    $wManip        = (int)Database::getSetting('weight_manipulation',  20);
 
     if (empty($anthropicKey)) {
-        echo json_encode(['success' => false, 'error' => 'Anthropic API anahtarı eksik.']);
+        echo json_encode(['success' => false, 'error' => 'Anthropic API anahtarı girilmemiş. Lütfen Ayarlar sekmesinden ekleyin.']);
         return;
     }
 
-    // Veri topla
     $provider = new DataProvider($binanceKey, $binanceSecret, $cpKey, $lcKey);
     $market   = $provider->collectAll($pair);
 
     $currentPrice = $market['price']['current'];
 
-    // Önce açık işlemleri TP/SL kontrol et
-    checkOpenTrades($db, $currentPrice, $tpPct, $slPct);
+    if ($currentPrice <= 0) {
+        echo json_encode(['success' => false, 'error' => "Fiyat verisi alınamadı ({$pair}). Parite adını kontrol edin."]);
+        return;
+    }
 
-    // AI kararı
+    checkOpenTrades($db, $pair, $currentPrice, $tpPct, $slPct);
+
     $engine   = new DecisionEngine($anthropicKey, $model, $wTech, $wSocial, $wNews, $wManip);
     $decision = $engine->analyze($market);
 
-    // Log
     $stmt = $db->prepare(
         'INSERT INTO logs (pair, decision, confidence, manipulation_risk, reason, raw_data)
          VALUES (:pair, :dec, :conf, :manip, :reason, :raw)'
@@ -78,17 +80,15 @@ function handleRun(): void
         ':raw'    => json_encode($market),
     ]);
 
-    // Trade işlemi
     $tradeResult = null;
     $balance     = (float)Database::getSetting('virtual_balance', 10000);
 
     if ($decision['decision'] === 'BUY') {
         $openTrade = getOpenTrade($db, $pair);
         if (!$openTrade) {
-            $amount   = ($balance * $tradeSizePct / 100) / $currentPrice;
-            $spent    = $amount * $currentPrice;
-
-            if ($balance >= $spent) {
+            $amount = ($balance * $tradeSizePct / 100) / $currentPrice;
+            $spent  = $amount * $currentPrice;
+            if ($balance >= $spent && $amount > 0) {
                 $ins = $db->prepare(
                     'INSERT INTO trades (pair, type, entry_price, quantity, manipulation_risk_score, ai_reason)
                      VALUES (:pair, :type, :price, :qty, :manip, :reason)'
@@ -101,7 +101,6 @@ function handleRun(): void
                     ':manip'  => $decision['manipulation_risk'],
                     ':reason' => $decision['reason'],
                 ]);
-
                 Database::setSetting('virtual_balance', $balance - $spent);
                 $tradeResult = ['action' => 'BUY', 'price' => $currentPrice, 'qty' => $amount];
             }
@@ -117,6 +116,8 @@ function handleRun(): void
         'success'           => true,
         'pair'              => $pair,
         'price'             => $currentPrice,
+        'price_source'      => $market['price']['source'] ?? 'unknown',
+        'change_pct'        => $market['price']['change_pct'] ?? 0,
         'decision'          => $decision['decision'],
         'confidence'        => $decision['confidence'],
         'manipulation_risk' => $decision['manipulation_risk'],
@@ -127,10 +128,25 @@ function handleRun(): void
     ]);
 }
 
+function handleGetPrice(): void
+{
+    $pair          = strtoupper(trim($_GET['pair'] ?? Database::getSetting('active_pair', 'BTCUSDT')));
+    $binanceKey    = Database::getSetting('binance_api_key', '');
+    $binanceSecret = Database::getSetting('binance_api_secret', '');
+    $provider      = new DataProvider($binanceKey, $binanceSecret, '', '');
+    $price         = $provider->getPrice($pair);
+
+    echo json_encode([
+        'success' => true,
+        'pair'    => $pair,
+        'price'   => $price,
+    ]);
+}
+
 function handleStatus(): void
 {
-    $db    = Database::getInstance();
-    $pair  = Database::getSetting('active_pair', 'BTCUSDT');
+    $db   = Database::getInstance();
+    $pair = Database::getSetting('active_pair', 'BTCUSDT');
 
     $openTrades = $db->query(
         "SELECT * FROM trades WHERE status = 'open' ORDER BY created_at DESC"
@@ -148,6 +164,16 @@ function handleStatus(): void
         "SELECT * FROM logs ORDER BY created_at DESC LIMIT 1"
     )->fetch();
 
+    // Mevcut fiyatı da döndür
+    $currentPrice = null;
+    try {
+        $binanceKey    = Database::getSetting('binance_api_key', '');
+        $binanceSecret = Database::getSetting('binance_api_secret', '');
+        $provider      = new DataProvider($binanceKey, $binanceSecret, '', '');
+        $priceData     = $provider->getPrice($pair);
+        $currentPrice  = $priceData;
+    } catch (Throwable) {}
+
     echo json_encode([
         'success'     => true,
         'balance'     => (float)Database::getSetting('virtual_balance', 10000),
@@ -155,6 +181,7 @@ function handleStatus(): void
         'open_trades' => $openTrades,
         'stats'       => $stats,
         'last_log'    => $lastLog,
+        'price'       => $currentPrice,
     ]);
 }
 
@@ -163,24 +190,21 @@ function handleCloseTrade(): void
     $db      = Database::getInstance();
     $tradeId = (int)($_POST['trade_id'] ?? 0);
 
-    $trade = $db->prepare("SELECT * FROM trades WHERE id = :id AND status = 'open'");
-    $trade->execute([':id' => $tradeId]);
-    $row = $trade->fetch();
+    $stmt = $db->prepare("SELECT * FROM trades WHERE id = :id AND status = 'open'");
+    $stmt->execute([':id' => $tradeId]);
+    $row = $stmt->fetch();
 
     if (!$row) {
         echo json_encode(['success' => false, 'error' => 'Açık işlem bulunamadı.']);
         return;
     }
 
-    // Binance'den güncel fiyat
-    $pair  = $row['pair'];
-    $url   = "https://api.binance.com/api/v3/ticker/price?symbol={$pair}";
-    $ch    = curl_init($url);
-    curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 10]);
-    $resp  = curl_exec($ch);
-    curl_close($ch);
-    $priceData    = json_decode($resp, true);
-    $currentPrice = (float)($priceData['price'] ?? $row['entry_price']);
+    $currentPrice = $row['entry_price'];
+    try {
+        $provider     = new DataProvider('', '', '', '');
+        $priceData    = $provider->getPrice($row['pair']);
+        $currentPrice = $priceData['current'] > 0 ? $priceData['current'] : $row['entry_price'];
+    } catch (Throwable) {}
 
     $result = closeTrade($db, $row, $currentPrice, 'Manuel kapama');
     echo json_encode(['success' => true, 'trade' => $result]);
@@ -212,15 +236,15 @@ function handleGetLogs(): void
     $limit  = min((int)($_GET['limit'] ?? 20), 100);
     $offset = (int)($_GET['offset'] ?? 0);
 
-    $logs = $db->prepare(
+    $stmt = $db->prepare(
         'SELECT id, pair, decision, confidence, manipulation_risk, reason, created_at
          FROM logs ORDER BY created_at DESC LIMIT :lim OFFSET :off'
     );
-    $logs->bindValue(':lim', $limit, PDO::PARAM_INT);
-    $logs->bindValue(':off', $offset, PDO::PARAM_INT);
-    $logs->execute();
+    $stmt->bindValue(':lim', $limit, PDO::PARAM_INT);
+    $stmt->bindValue(':off', $offset, PDO::PARAM_INT);
+    $stmt->execute();
 
-    echo json_encode(['success' => true, 'logs' => $logs->fetchAll()]);
+    echo json_encode(['success' => true, 'logs' => $stmt->fetchAll()]);
 }
 
 function handleGetTrades(): void
@@ -239,7 +263,115 @@ function handleGetTrades(): void
     echo json_encode(['success' => true, 'trades' => $trades]);
 }
 
-// ─── Helpers ───────────────────────────────────────────────────────────────
+function handleTestApi(): void
+{
+    $api = $_POST['api'] ?? $_GET['api'] ?? '';
+    $key = trim($_POST['key'] ?? '');
+
+    switch ($api) {
+        case 'anthropic':
+            if (empty($key)) {
+                echo json_encode(['success' => false, 'error' => 'API key boş']);
+                return;
+            }
+            $model = Database::getSetting('ai_model', 'claude-sonnet-4-5');
+            $body  = json_encode([
+                'model'      => $model,
+                'max_tokens' => 10,
+                'messages'   => [['role' => 'user', 'content' => 'test']],
+            ]);
+            $ch = curl_init('https://api.anthropic.com/v1/messages');
+            curl_setopt_array($ch, [
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_POST           => true,
+                CURLOPT_POSTFIELDS     => $body,
+                CURLOPT_TIMEOUT        => 15,
+                CURLOPT_HTTPHEADER     => [
+                    'Content-Type: application/json',
+                    "x-api-key: {$key}",
+                    'anthropic-version: 2023-06-01',
+                ],
+            ]);
+            $resp = curl_exec($ch);
+            $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            curl_close($ch);
+            $data = json_decode($resp, true);
+            if ($code === 200) {
+                echo json_encode(['success' => true, 'message' => "Anthropic API bağlantısı başarılı. Model: {$model}"]);
+            } else {
+                $msg = $data['error']['message'] ?? "HTTP {$code}";
+                echo json_encode(['success' => false, 'error' => $msg]);
+            }
+            break;
+
+        case 'binance':
+            $ch = curl_init('https://api.binance.com/api/v3/time');
+            curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 10]);
+            $resp = curl_exec($ch);
+            $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            curl_close($ch);
+            $data = json_decode($resp, true);
+            if ($code === 200 && isset($data['serverTime'])) {
+                $ts = date('H:i:s', intdiv($data['serverTime'], 1000));
+                echo json_encode(['success' => true, 'message' => "Binance API erişilebilir. Sunucu saati: {$ts}"]);
+            } else {
+                $msg = $data['msg'] ?? "HTTP {$code} — Geo-kısıtlı olabilir, fiyat CoinGecko'dan alınacak.";
+                echo json_encode(['success' => false, 'error' => $msg]);
+            }
+            break;
+
+        case 'cryptopanic':
+            if (empty($key)) {
+                echo json_encode(['success' => false, 'error' => 'API key boş']);
+                return;
+            }
+            $url  = "https://cryptopanic.com/api/v1/posts/?auth_token={$key}&public=true";
+            $ch   = curl_init($url);
+            curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 10]);
+            $resp = curl_exec($ch);
+            $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            curl_close($ch);
+            $data = json_decode($resp, true);
+            if ($code === 200 && isset($data['results'])) {
+                $count = count($data['results']);
+                echo json_encode(['success' => true, 'message' => "CryptoPanic bağlantısı başarılı. {$count} haber alındı."]);
+            } else {
+                $msg = $data['detail'] ?? $data['error'] ?? "HTTP {$code}";
+                echo json_encode(['success' => false, 'error' => $msg]);
+            }
+            break;
+
+        case 'lunarcrush':
+            if (empty($key)) {
+                echo json_encode(['success' => false, 'error' => 'API key boş']);
+                return;
+            }
+            $url = 'https://lunarcrush.com/api4/public/coins/bitcoin/v1';
+            $ch  = curl_init($url);
+            curl_setopt_array($ch, [
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_TIMEOUT        => 10,
+                CURLOPT_HTTPHEADER     => ["Authorization: Bearer {$key}"],
+            ]);
+            $resp = curl_exec($ch);
+            $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            curl_close($ch);
+            $data = json_decode($resp, true);
+            if ($code === 200 && isset($data['data'])) {
+                $score = $data['data']['galaxy_score'] ?? '?';
+                echo json_encode(['success' => true, 'message' => "LunarCrush bağlantısı başarılı. BTC Galaxy Score: {$score}"]);
+            } else {
+                $msg = $data['error'] ?? $data['message'] ?? "HTTP {$code}";
+                echo json_encode(['success' => false, 'error' => $msg]);
+            }
+            break;
+
+        default:
+            echo json_encode(['success' => false, 'error' => "Bilinmeyen API: {$api}"]);
+    }
+}
+
+// ─── Helpers ────────────────────────────────────────────────────────────────
 
 function getOpenTrade(PDO $db, string $pair): array|false
 {
@@ -250,12 +382,13 @@ function getOpenTrade(PDO $db, string $pair): array|false
 
 function closeTrade(PDO $db, array $trade, float $exitPrice, string $note): array
 {
-    $pnl     = ($exitPrice - $trade['entry_price']) * $trade['quantity'];
-    $pnlPct  = (($exitPrice - $trade['entry_price']) / $trade['entry_price']) * 100;
+    $pnl    = ($exitPrice - $trade['entry_price']) * $trade['quantity'];
+    $pnlPct = $trade['entry_price'] > 0
+        ? (($exitPrice - $trade['entry_price']) / $trade['entry_price']) * 100
+        : 0;
 
     $upd = $db->prepare(
-        'UPDATE trades SET status = :s, exit_price = :ep, pnl = :pnl, closed_at = CURRENT_TIMESTAMP
-         WHERE id = :id'
+        'UPDATE trades SET status = :s, exit_price = :ep, pnl = :pnl, closed_at = CURRENT_TIMESTAMP WHERE id = :id'
     );
     $upd->execute([':s' => 'closed', ':ep' => $exitPrice, ':pnl' => $pnl, ':id' => $trade['id']]);
 
@@ -263,22 +396,23 @@ function closeTrade(PDO $db, array $trade, float $exitPrice, string $note): arra
     Database::setSetting('virtual_balance', $balance + ($trade['quantity'] * $exitPrice));
 
     return [
-        'trade_id'   => $trade['id'],
-        'pair'       => $trade['pair'],
-        'entry'      => $trade['entry_price'],
-        'exit'       => $exitPrice,
-        'pnl'        => round($pnl, 4),
-        'pnl_pct'    => round($pnlPct, 2),
-        'note'       => $note,
+        'trade_id' => $trade['id'],
+        'pair'     => $trade['pair'],
+        'entry'    => $trade['entry_price'],
+        'exit'     => $exitPrice,
+        'pnl'      => round($pnl, 4),
+        'pnl_pct'  => round($pnlPct, 2),
+        'note'     => $note,
     ];
 }
 
-function checkOpenTrades(PDO $db, float $currentPrice, float $tpPct, float $slPct): void
+function checkOpenTrades(PDO $db, string $pair, float $currentPrice, float $tpPct, float $slPct): void
 {
-    $stmt = $db->query("SELECT * FROM trades WHERE status = 'open'");
+    $stmt   = $db->query("SELECT * FROM trades WHERE status = 'open'");
     $trades = $stmt->fetchAll();
 
     foreach ($trades as $trade) {
+        if ($trade['entry_price'] <= 0) continue;
         $pct = (($currentPrice - $trade['entry_price']) / $trade['entry_price']) * 100;
 
         if ($pct >= $tpPct) {
