@@ -488,7 +488,14 @@ async function runBotCycle() {
     hideBotError();
     try {
         const resp = await fetch(`bot_engine.php?action=run&pair=${pair}`);
-        const data = await resp.json();
+        let data;
+        try {
+            data = await resp.json();
+        } catch {
+            const text = await resp.text().catch(() => `HTTP ${resp.status}`);
+            showBotError('Sunucu yanıtı JSON değil: ' + text.substring(0, 150));
+            return;
+        }
         if (!data.success) {
             showBotError(data.error || 'Bilinmeyen hata');
             return;
@@ -862,14 +869,21 @@ async function testApi(api, inputId, resultId) {
 
     try {
         const resp = await fetch('bot_engine.php', { method: 'POST', body: fd });
-        const data = await resp.json();
+        let data;
+        try {
+            data = await resp.json();
+        } catch {
+            const text = await resp.text().catch(() => `HTTP ${resp.status}`);
+            el.innerHTML = `<span class="text-danger small"><i class="bi bi-x-circle me-1"></i>Sunucu yanıtı: ${text.substring(0, 120)}</span>`;
+            return;
+        }
         if (data.success) {
             el.innerHTML = `<span class="text-success small"><i class="bi bi-check-circle me-1"></i>${data.message}</span>`;
         } else {
             el.innerHTML = `<span class="text-danger small"><i class="bi bi-x-circle me-1"></i>${data.error}</span>`;
         }
     } catch(e) {
-        el.innerHTML = `<span class="text-danger small"><i class="bi bi-x-circle me-1"></i>Bağlantı hatası</span>`;
+        el.innerHTML = `<span class="text-danger small"><i class="bi bi-x-circle me-1"></i>İstek başarısız: ${e.message}</span>`;
     }
 }
 

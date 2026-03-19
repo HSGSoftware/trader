@@ -223,24 +223,29 @@ class DataProvider
 
     private function get(string $url, array $headers = [], bool $browserAgent = false): array
     {
-        $ch = curl_init($url);
-        $opts = [
+        $baseOpts = [
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_TIMEOUT        => 15,
             CURLOPT_HTTPHEADER     => array_merge(['Accept: application/json'], $headers),
-            CURLOPT_SSL_VERIFYPEER => true,
+            CURLOPT_FOLLOWLOCATION => true,
         ];
         if ($browserAgent) {
-            $opts[CURLOPT_USERAGENT] = 'Mozilla/5.0 (compatible; CryptoBot/1.0)';
+            $baseOpts[CURLOPT_USERAGENT] = 'Mozilla/5.0 (compatible; CryptoBot/1.0)';
         }
-        curl_setopt_array($ch, $opts);
-        $body     = curl_exec($ch);
-        $err      = curl_error($ch);
-        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        curl_close($ch);
 
-        if ($err) {
-            throw new RuntimeException("HTTP isteği başarısız: {$err}");
+        foreach ([true, false] as $verifySsl) {
+            $ch = curl_init($url);
+            curl_setopt_array($ch, $baseOpts + [CURLOPT_SSL_VERIFYPEER => $verifySsl]);
+            $body     = curl_exec($ch);
+            $err      = curl_error($ch);
+            $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            curl_close($ch);
+
+            if ($err) {
+                if ($verifySsl) continue;
+                throw new RuntimeException("HTTP isteği başarısız: {$err}");
+            }
+            break;
         }
 
         $decoded = json_decode($body, true);

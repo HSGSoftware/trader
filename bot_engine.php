@@ -2,6 +2,8 @@
 
 declare(strict_types=1);
 
+ob_start();
+ini_set('display_errors', '0');
 header('Content-Type: application/json; charset=utf-8');
 
 require_once __DIR__ . '/src/Database.php';
@@ -20,11 +22,15 @@ try {
         'get_logs'      => handleGetLogs(),
         'get_trades'    => handleGetTrades(),
         'test_api'      => handleTestApi(),
+        'ping'          => handlePing(),
         default         => throw new InvalidArgumentException("Bilinmeyen action: {$action}"),
     };
 } catch (Throwable $e) {
+    ob_clean();
     echo json_encode(['success' => false, 'error' => $e->getMessage()]);
 }
+
+ob_end_flush();
 
 // ─── Handlers ───────────────────────────────────────────────────────────────
 
@@ -263,6 +269,17 @@ function handleGetTrades(): void
     echo json_encode(['success' => true, 'trades' => $trades]);
 }
 
+function handlePing(): void
+{
+    echo json_encode([
+        'success'    => true,
+        'php'        => PHP_VERSION,
+        'curl'       => extension_loaded('curl'),
+        'pdo_sqlite' => extension_loaded('pdo_sqlite'),
+        'time'       => date('c'),
+    ]);
+}
+
 function handleTestApi(): void
 {
     $api = $_POST['api'] ?? $_GET['api'] ?? '';
@@ -274,48 +291,42 @@ function handleTestApi(): void
                 echo json_encode(['success' => false, 'error' => 'API key boş']);
                 return;
             }
-            $model = Database::getSetting('ai_model', 'claude-sonnet-4-5');
-            $body  = json_encode([
+            $model   = Database::getSetting('ai_model', 'claude-sonnet-4-5');
+            $reqBody = json_encode([
                 'model'      => $model,
                 'max_tokens' => 10,
                 'messages'   => [['role' => 'user', 'content' => 'test']],
             ]);
-            $ch = curl_init('https://api.anthropic.com/v1/messages');
-            curl_setopt_array($ch, [
-                CURLOPT_RETURNTRANSFER => true,
-                CURLOPT_POST           => true,
-                CURLOPT_POSTFIELDS     => $body,
-                CURLOPT_TIMEOUT        => 15,
-                CURLOPT_HTTPHEADER     => [
-                    'Content-Type: application/json',
-                    "x-api-key: {$key}",
-                    'anthropic-version: 2023-06-01',
-                ],
-            ]);
-            $resp = curl_exec($ch);
-            $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-            curl_close($ch);
-            $data = json_decode($resp, true);
-            if ($code === 200) {
+            $r    = curlGet('https://api.anthropic.com/v1/messages', [
+                'Content-Type: application/json',
+                "x-api-key: {$key}",
+                'anthropic-version: 2023-06-01',
+            ], $reqBody);
+            if ($r['error']) {
+                echo json_encode(['success' => false, 'error' => "Curl hatası: {$r['error']}"]);
+                return;
+            }
+            $data = json_decode($r['body'], true);
+            if ($r['code'] === 200) {
                 echo json_encode(['success' => true, 'message' => "Anthropic API bağlantısı başarılı. Model: {$model}"]);
             } else {
-                $msg = $data['error']['message'] ?? "HTTP {$code}";
+                $msg = $data['error']['message'] ?? "HTTP {$r['code']}";
                 echo json_encode(['success' => false, 'error' => $msg]);
             }
             break;
 
         case 'binance':
-            $ch = curl_init('https://api.binance.com/api/v3/time');
-            curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 10]);
-            $resp = curl_exec($ch);
-            $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-            curl_close($ch);
-            $data = json_decode($resp, true);
-            if ($code === 200 && isset($data['serverTime'])) {
+            $r    = curlGet('https://api.binance.com/api/v3/time');
+            if ($r['error']) {
+                echo json_encode(['success' => false, 'error' => "Curl hatası: {$r['error']}"]);
+                return;
+            }
+            $data = json_decode($r['body'], true);
+            if ($r['code'] === 200 && isset($data['serverTime'])) {
                 $ts = date('H:i:s', intdiv($data['serverTime'], 1000));
                 echo json_encode(['success' => true, 'message' => "Binance API erişilebilir. Sunucu saati: {$ts}"]);
             } else {
-                $msg = $data['msg'] ?? "HTTP {$code} — Geo-kısıtlı olabilir, fiyat CoinGecko'dan alınacak.";
+                $msg = $data['msg'] ?? "HTTP {$r['code']} — Geo-kısıtlı olabilir, fiyat CoinGecko'dan otomatik alınacak.";
                 echo json_encode(['success' => false, 'error' => $msg]);
             }
             break;
@@ -325,18 +336,17 @@ function handleTestApi(): void
                 echo json_encode(['success' => false, 'error' => 'API key boş']);
                 return;
             }
-            $url  = "https://cryptopanic.com/api/v1/posts/?auth_token={$key}&public=true";
-            $ch   = curl_init($url);
-            curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 10]);
-            $resp = curl_exec($ch);
-            $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-            curl_close($ch);
-            $data = json_decode($resp, true);
-            if ($code === 200 && isset($data['results'])) {
+            $r    = curlGet("https://cryptopanic.com/api/v1/posts/?auth_token={$key}&public=true");
+            if ($r['error']) {
+                echo json_encode(['success' => false, 'error' => "Curl hatası: {$r['error']}"]);
+                return;
+            }
+            $data = json_decode($r['body'], true);
+            if ($r['code'] === 200 && isset($data['results'])) {
                 $count = count($data['results']);
                 echo json_encode(['success' => true, 'message' => "CryptoPanic bağlantısı başarılı. {$count} haber alındı."]);
             } else {
-                $msg = $data['detail'] ?? $data['error'] ?? "HTTP {$code}";
+                $msg = $data['detail'] ?? $data['error'] ?? "HTTP {$r['code']}";
                 echo json_encode(['success' => false, 'error' => $msg]);
             }
             break;
@@ -346,22 +356,17 @@ function handleTestApi(): void
                 echo json_encode(['success' => false, 'error' => 'API key boş']);
                 return;
             }
-            $url = 'https://lunarcrush.com/api4/public/coins/bitcoin/v1';
-            $ch  = curl_init($url);
-            curl_setopt_array($ch, [
-                CURLOPT_RETURNTRANSFER => true,
-                CURLOPT_TIMEOUT        => 10,
-                CURLOPT_HTTPHEADER     => ["Authorization: Bearer {$key}"],
-            ]);
-            $resp = curl_exec($ch);
-            $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-            curl_close($ch);
-            $data = json_decode($resp, true);
-            if ($code === 200 && isset($data['data'])) {
+            $r    = curlGet('https://lunarcrush.com/api4/public/coins/bitcoin/v1', ["Authorization: Bearer {$key}"]);
+            if ($r['error']) {
+                echo json_encode(['success' => false, 'error' => "Curl hatası: {$r['error']}"]);
+                return;
+            }
+            $data = json_decode($r['body'], true);
+            if ($r['code'] === 200 && isset($data['data'])) {
                 $score = $data['data']['galaxy_score'] ?? '?';
                 echo json_encode(['success' => true, 'message' => "LunarCrush bağlantısı başarılı. BTC Galaxy Score: {$score}"]);
             } else {
-                $msg = $data['error'] ?? $data['message'] ?? "HTTP {$code}";
+                $msg = $data['error'] ?? $data['message'] ?? "HTTP {$r['code']}";
                 echo json_encode(['success' => false, 'error' => $msg]);
             }
             break;
@@ -369,6 +374,38 @@ function handleTestApi(): void
         default:
             echo json_encode(['success' => false, 'error' => "Bilinmeyen API: {$api}"]);
     }
+}
+
+// ─── Curl Helper ────────────────────────────────────────────────────────────
+
+function curlGet(string $url, array $headers = [], ?string $postBody = null): array
+{
+    foreach ([true, false] as $verifySsl) {
+        $ch = curl_init($url);
+        $opts = [
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT        => 15,
+            CURLOPT_SSL_VERIFYPEER => $verifySsl,
+            CURLOPT_HTTPHEADER     => array_merge(['Accept: application/json'], $headers),
+            CURLOPT_FOLLOWLOCATION => true,
+        ];
+        if ($postBody !== null) {
+            $opts[CURLOPT_POST]       = true;
+            $opts[CURLOPT_POSTFIELDS] = $postBody;
+        }
+        curl_setopt_array($ch, $opts);
+        $resp = curl_exec($ch);
+        $err  = curl_error($ch);
+        $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        if (!$err) {
+            return ['body' => $resp, 'code' => $code, 'error' => ''];
+        }
+        if (!$verifySsl) {
+            return ['body' => '', 'code' => 0, 'error' => $err];
+        }
+    }
+    return ['body' => '', 'code' => 0, 'error' => 'curl failed'];
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
