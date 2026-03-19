@@ -1,0 +1,5 @@
+db/database.sqlite
+db/*.sqlite
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
